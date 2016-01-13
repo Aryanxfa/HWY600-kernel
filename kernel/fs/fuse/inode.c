@@ -7,7 +7,7 @@
 */
 
 #include "fuse_i.h"
-#include "fuse.h"
+
 #include <linux/pagemap.h>
 #include <linux/slab.h>
 #include <linux/file.h>
@@ -20,7 +20,7 @@
 #include <linux/random.h>
 #include <linux/sched.h>
 #include <linux/exportfs.h>
-#include <mach/env.h>
+
 MODULE_AUTHOR("Miklos Szeredi <miklos@szeredi.hu>");
 MODULE_DESCRIPTION("Filesystem in Userspace");
 MODULE_LICENSE("GPL");
@@ -374,21 +374,6 @@ static void convert_fuse_statfs(struct kstatfs *stbuf, struct fuse_kstatfs *attr
 	stbuf->f_files   = attr->files;
 	stbuf->f_ffree   = attr->ffree;
 	stbuf->f_namelen = attr->namelen;
-//#ifdef LIMIT_SDCARD_SIZE
-#if 0
-	stbuf->f_blocks  -= (u32)data_free_size_th/attr->bsize;
-
-	if(stbuf->f_bfree < ((u32)data_free_size_th/attr->bsize)){
-		stbuf->f_bfree = 0;
-	}else{
-		stbuf->f_bfree	 -= (u32)data_free_size_th/attr->bsize;
-	}
-	if(stbuf->f_bavail < ((u32)data_free_size_th/attr->bsize)){
-		stbuf->f_bavail = 0;
-	}else{
-		stbuf->f_bavail	 -= (u32)data_free_size_th/attr->bsize;
-	}
-#endif
 	/* fsid is left zero */
 }
 
@@ -1098,7 +1083,7 @@ static void fuse_kill_sb_anon(struct super_block *sb)
 static struct file_system_type fuse_fs_type = {
 	.owner		= THIS_MODULE,
 	.name		= "fuse",
-	.fs_flags	= FS_HAS_SUBTYPE | FS_IS_FUSE,
+	.fs_flags	= FS_HAS_SUBTYPE,
 	.mount		= fuse_mount,
 	.kill_sb	= fuse_kill_sb_anon,
 };
@@ -1129,7 +1114,7 @@ static struct file_system_type fuseblk_fs_type = {
 	.name		= "fuseblk",
 	.mount		= fuse_mount_blk,
 	.kill_sb	= fuse_kill_sb_blk,
-	.fs_flags	= FS_REQUIRES_DEV | FS_HAS_SUBTYPE | FS_IS_FUSE,
+	.fs_flags	= FS_REQUIRES_DEV | FS_HAS_SUBTYPE,
 };
 
 static inline int register_fuseblk(void)
@@ -1255,7 +1240,7 @@ static int __init fuse_init(void)
 
 	sanitize_global_limit(&max_user_bgreq);
 	sanitize_global_limit(&max_user_congthresh);
-	fuse_iolog_init();
+
 	return 0;
 
  err_sysfs_cleanup:
@@ -1276,7 +1261,6 @@ static void __exit fuse_exit(void)
 	fuse_sysfs_cleanup();
 	fuse_fs_cleanup();
 	fuse_dev_cleanup();
-	fuse_iolog_exit();
 }
 
 module_init(fuse_init);

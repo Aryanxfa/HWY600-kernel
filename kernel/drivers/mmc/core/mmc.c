@@ -22,9 +22,6 @@
 #include "bus.h"
 #include "mmc_ops.h"
 #include "sd_ops.h"
-#ifdef MTK_EMMC_SUPPORT
-	extern int init_pmt(void);
-#endif
 
 static const unsigned int tran_exp[] = {
 	10000,		100000,		1000000,	10000000,
@@ -241,7 +238,6 @@ static int mmc_get_ext_csd(struct mmc_card *card, u8 **new_ext_csd)
 /*
  * Decode extended CSD.
  */
-#define VENDOR_SAMSUNG  (0x15)
 static int mmc_read_ext_csd(struct mmc_card *card, u8 *ext_csd)
 {
 	int err = 0, idx;
@@ -266,7 +262,7 @@ static int mmc_read_ext_csd(struct mmc_card *card, u8 *ext_csd)
 	}
 
 	card->ext_csd.rev = ext_csd[EXT_CSD_REV];
-	if (card->ext_csd.rev > 7) {
+	if (card->ext_csd.rev > 6) {
 		pr_err("%s: unrecognised EXT_CSD revision %d\n",
 			mmc_hostname(card->host), card->ext_csd.rev);
 		err = -EINVAL;
@@ -352,12 +348,9 @@ static int mmc_read_ext_csd(struct mmc_card *card, u8 *ext_csd)
 		card->ext_csd.part_time = 10 * ext_csd[EXT_CSD_PART_SWITCH_TIME];
 
 		/* Sleep / awake timeout in 100ns units */
-		if (sa_shift > 0 && sa_shift <= 0x17) {
+		if (sa_shift > 0 && sa_shift <= 0x17)
 			card->ext_csd.sa_timeout =
 					1 << ext_csd[EXT_CSD_S_A_TIMEOUT];
-	    } else {
-	        card->ext_csd.sa_timeout = 0;
-	    }
 		card->ext_csd.erase_group_def =
 			ext_csd[EXT_CSD_ERASE_GROUP_DEF];
 		card->ext_csd.hc_erase_timeout = 300 *
@@ -511,14 +504,6 @@ static int mmc_read_ext_csd(struct mmc_card *card, u8 *ext_csd)
 		card->erased_byte = 0xFF;
 	else
 		card->erased_byte = 0x0;
-
-        /* for samsung emmc4.41 plus spec */
-        if ((card->cid.manfid == VENDOR_SAMSUNG) && 
-            (card->ext_csd.rev == 5)             && 
-            (1 == (0x1 & ext_csd[EXT_CSD_SAMSUNG_FEATURE]))){
-            printk("set to support discard\n");
-            card->ext_csd.feature_support |= MMC_DISCARD_FEATURE;
-        }
 
 	/* eMMC v4.5 or later */
 	if (card->ext_csd.rev >= 6) {
@@ -1285,14 +1270,6 @@ static int mmc_init_card(struct mmc_host *host, u32 ocr,
 	if (!oldcard)
 		host->card = card;
 
-#ifdef MTK_EMMC_SUPPORT_OTP 
-    /* enable hc erase grp size */
-    printk("switch to hc erase grp size\n");
-    err = mmc_switch(card, EXT_CSD_CMD_SET_NORMAL,
-            EXT_CSD_ERASE_GROUP_DEF, 1, 0);
-    card->ext_csd.erase_group_def = 1;
-#endif
-
 	mmc_free_ext_csd(ext_csd);
 	return 0;
 
@@ -1539,10 +1516,6 @@ int mmc_attach_mmc(struct mmc_host *host)
 
 	mmc_release_host(host);
 	err = mmc_add_card(host->card);
-#ifdef MTK_EMMC_SUPPORT
-	//err = init_pmt();
-	host->card_init_complete(host);
-#endif
 	mmc_claim_host(host);
 	if (err)
 		goto remove_card;

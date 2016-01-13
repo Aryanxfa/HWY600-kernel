@@ -201,7 +201,6 @@ static int slave_configure(struct scsi_device *sdev)
 		/* Some devices cannot handle READ_CAPACITY_16 */
 		if (us->fflags & US_FL_NO_READ_CAPACITY_16)
 			sdev->no_read_capacity_16 = 1;
-			
 
 		/*
 		 * Many devices do not respond properly to READ_CAPACITY_16.
@@ -337,7 +336,6 @@ static DEF_SCSI_QCMD(queuecommand)
 /* Command timeout and abort */
 static int command_abort(struct scsi_cmnd *srb)
 {
-#ifndef MTK_EXTERNAL_DONGLE_SUPPORT
 	struct us_data *us = host_to_us(srb->device->host);
 
 	US_DEBUGP("%s called\n", __func__);
@@ -367,7 +365,6 @@ static int command_abort(struct scsi_cmnd *srb)
 
 	/* Wait for the aborted command to finish */
 	wait_for_completion(&us->notify);
-#endif
 	return SUCCESS;
 }
 

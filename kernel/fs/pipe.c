@@ -568,11 +568,7 @@ redo1:
 			int error, atomic = 1;
 
 			if (!page) {
-				#ifndef CONFIG_MTK_PAGERECORDER
-					page = alloc_page(GFP_HIGHUSER & ~__GFP_HIGHMEM);
-				#else
-					page = alloc_page_nopagedebug(GFP_HIGHUSER & ~__GFP_HIGHMEM);
-				#endif
+				page = alloc_page(GFP_HIGHUSER);
 				if (unlikely(!page)) {
 					ret = ret ? : -ENOMEM;
 					break;
@@ -658,8 +654,11 @@ out:
 		wake_up_interruptible_sync_poll(&pipe->wait, POLLIN | POLLRDNORM);
 		kill_fasync(&pipe->fasync_readers, SIGIO, POLL_IN);
 	}
-	if (ret > 0)
-		file_update_time(filp);
+	if (ret > 0) {
+		int err = file_update_time(filp);
+		if (err)
+			ret = err;
+	}
 	return ret;
 }
 

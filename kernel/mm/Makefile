@@ -2,13 +2,6 @@
 # Makefile for the linux memory manager.
 #
 
-ifeq ($(MTK_INTERNAL), yes)
-ifeq ($(MTK_USE_RESERVED_EXT_MEM), yes)
-KBUILD_CFLAGS += -DMTK_USE_RESERVED_EXT_MEM
-endif
-endif
-
-
 mmu-y			:= nommu.o
 mmu-$(CONFIG_MMU)	:= fremap.o highmem.o madvise.o memory.o mincore.o \
 			   mlock.o mmap.o mprotect.o mremap.o msync.o rmap.o \
@@ -58,4 +51,3 @@ obj-$(CONFIG_HWPOISON_INJECT) += hwpoison-inject.o
 obj-$(CONFIG_DEBUG_KMEMLEAK) += kmemleak.o
 obj-$(CONFIG_DEBUG_KMEMLEAK_TEST) += kmemleak-test.o
 obj-$(CONFIG_CLEANCACHE) += cleancache.o
-obj-$(CONFIG_MTK_PAGERECORDER) += kmempagerecorder.o

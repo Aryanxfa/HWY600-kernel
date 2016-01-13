@@ -1,12 +1,6 @@
 
 # Do not instrument the tracer itself:
 
-ifeq ($(MTK_INTERNAL), yes)
-ifeq ($(MTK_USE_RESERVED_EXT_MEM), yes)
-KBUILD_CFLAGS += -DMTK_USE_RESERVED_EXT_MEM
-endif
-endif
-
 ifdef CONFIG_FUNCTION_TRACER
 ORIG_CFLAGS := $(KBUILD_CFLAGS)
 KBUILD_CFLAGS = $(subst -pg,,$(ORIG_CFLAGS))

@@ -88,9 +88,6 @@
 #include <linux/random.h>
 #include "ubi.h"
 
-/* The erase counter value for this physical eraseblock is unknown */
-#define UBI_SCAN_UNKNOWN_EC (-1)
-
 #ifdef CONFIG_MTD_UBI_DEBUG
 static int paranoid_check_si(struct ubi_device *ubi, struct ubi_scan_info *si);
 #else
@@ -129,10 +126,6 @@ static int add_to_list(struct ubi_scan_info *si, int pnum, int ec, int to_head,
 	} else if (list == &si->alien) {
 		dbg_bld("add to alien: PEB %d, EC %d", pnum, ec);
 		si->alien_peb_count += 1;
-#ifdef CONFIG_BLB
-	} else if (list == &si->waiting) {
-		dbg_bld("add to waiting: PEB %d, EC %d", pnum, ec);
-#endif
 	} else
 		BUG();
 
@@ -291,10 +284,6 @@ static struct ubi_scan_volume *add_volume(struct ubi_scan_info *si, int vol_id,
 	sv->compat = vid_hdr->compat;
 	sv->vol_type = vid_hdr->vol_type == UBI_VID_DYNAMIC ? UBI_DYNAMIC_VOLUME
 							    : UBI_STATIC_VOLUME;
-	if(sv->vol_type == UBI_DYNAMIC_VOLUME &&  sv->used_ebs != 0) {
-		ubi_err("bad used_ebs %d in vol %d peb %d\n", sv->used_ebs, vol_id, pnum);
-	}
-
 	if (vol_id > si->highest_vol_id)
 		si->highest_vol_id = vol_id;
 
@@ -325,9 +314,10 @@ static struct ubi_scan_volume *add_volume(struct ubi_scan_info *si, int vol_id,
  *     o bit 2 is cleared: the older LEB is not corrupted;
  *     o bit 2 is set: the older LEB is corrupted.
  */
-int compare_lebs(struct ubi_device *ubi, const struct ubi_scan_leb *seb,
+static int compare_lebs(struct ubi_device *ubi, const struct ubi_scan_leb *seb,
 			int pnum, const struct ubi_vid_hdr *vid_hdr)
 {
+	void *buf;
 	int len, err, second_is_newer, bitflips = 0, corrupted = 0;
 	uint32_t data_crc, crc;
 	struct ubi_vid_hdr *vh = NULL;
@@ -398,14 +388,18 @@ int compare_lebs(struct ubi_device *ubi, const struct ubi_scan_leb *seb,
 	/* Read the data of the copy and check the CRC */
 
 	len = be32_to_cpu(vid_hdr->data_size);
+	buf = vmalloc(len);
+	if (!buf) {
+		err = -ENOMEM;
+		goto out_free_vidh;
+	}
 
-	mutex_lock(&ubi->buf_mutex);
-	err = ubi_io_read_data(ubi, ubi->peb_buf, pnum, 0, len);
+	err = ubi_io_read_data(ubi, buf, pnum, 0, len);
 	if (err && err != UBI_IO_BITFLIPS && !mtd_is_eccerr(err))
-		goto out_unlock;
+		goto out_free_buf;
 
 	data_crc = be32_to_cpu(vid_hdr->data_crc);
-	crc = crc32(UBI_CRC32_INIT, ubi->peb_buf, len);
+	crc = crc32(UBI_CRC32_INIT, buf, len);
 	if (crc != data_crc) {
 		dbg_bld("PEB %d CRC error: calculated %#08x, must be %#08x",
 			pnum, crc, data_crc);
@@ -416,8 +410,8 @@ int compare_lebs(struct ubi_device *ubi, const struct ubi_scan_leb *seb,
 		dbg_bld("PEB %d CRC is OK", pnum);
 		bitflips = !!err;
 	}
-	mutex_unlock(&ubi->buf_mutex);
 
+	vfree(buf);
 	ubi_free_vid_hdr(ubi, vh);
 
 	if (second_is_newer)
@@ -427,8 +421,8 @@ int compare_lebs(struct ubi_device *ubi, const struct ubi_scan_leb *seb,
 
 	return second_is_newer | (bitflips << 1) | (corrupted << 2);
 
-out_unlock:
-	mutex_unlock(&ubi->buf_mutex);
+out_free_buf:
+	vfree(buf);
 out_free_vidh:
 	ubi_free_vid_hdr(ubi, vh);
 	return err;
@@ -625,6 +619,35 @@ struct ubi_scan_volume *ubi_scan_find_sv(const struct ubi_scan_info *si,
 }
 
 /**
+ * ubi_scan_find_seb - find LEB in the volume scanning information.
+ * @sv: a pointer to the volume scanning information
+ * @lnum: the requested logical eraseblock
+ *
+ * This function returns a pointer to the scanning logical eraseblock or %NULL
+ * if there are no data about it in the scanning volume information.
+ */
+struct ubi_scan_leb *ubi_scan_find_seb(const struct ubi_scan_volume *sv,
+				       int lnum)
+{
+	struct ubi_scan_leb *seb;
+	struct rb_node *p = sv->root.rb_node;
+
+	while (p) {
+		seb = rb_entry(p, struct ubi_scan_leb, u.rb);
+
+		if (lnum == seb->lnum)
+			return seb;
+
+		if (lnum > seb->lnum)
+			p = p->rb_left;
+		else
+			p = p->rb_right;
+	}
+
+	return NULL;
+}
+
+/**
  * ubi_scan_rm_volume - delete scanning information about a volume.
  * @si: scanning information
  * @sv: the volume scanning information to delete
@@ -715,7 +738,7 @@ struct ubi_scan_leb *ubi_scan_get_free_peb(struct ubi_device *ubi,
 	if (!list_empty(&si->free)) {
 		seb = list_entry(si->free.next, struct ubi_scan_leb, u.list);
 		list_del(&seb->u.list);
-		ubi_msg("return free PEB %d, EC %d", seb->pnum, seb->ec);
+		dbg_bld("return free PEB %d, EC %d", seb->pnum, seb->ec);
 		return seb;
 	}
 
@@ -735,7 +758,7 @@ struct ubi_scan_leb *ubi_scan_get_free_peb(struct ubi_device *ubi,
 
 		seb->ec += 1;
 		list_del(&seb->u.list);
-		ubi_msg("return PEB %d, EC %d", seb->pnum, seb->ec);
+		dbg_bld("return PEB %d, EC %d", seb->pnum, seb->ec);
 		return seb;
 	}
 
@@ -808,14 +831,12 @@ out_unlock:
  * @ubi: UBI device description object
  * @si: scanning information
  * @pnum: the physical eraseblock number
- * @vid: The volume ID of the found volume will be stored in this pointer
- * @sqnum: The sqnum of the found volume will be stored in this pointer
  *
  * This function returns a zero if the physical eraseblock was successfully
  * handled and a negative error code in case of failure.
  */
 static int process_eb(struct ubi_device *ubi, struct ubi_scan_info *si,
-		      int pnum, int *vid, unsigned long long *sqnum)
+		      int pnum)
 {
 	long long uninitialized_var(ec);
 	int err, bitflips = 0, vol_id, ec_err = 0;
@@ -827,6 +848,11 @@ static int process_eb(struct ubi_device *ubi, struct ubi_scan_info *si,
 	if (err < 0)
 		return err;
 	else if (err) {
+		/*
+		 * FIXME: this is actually duty of the I/O sub-system to
+		 * initialize this, but MTD does not provide enough
+		 * information.
+		 */
 		si->bad_peb_count += 1;
 		return 0;
 	}
@@ -956,14 +982,10 @@ static int process_eb(struct ubi_device *ubi, struct ubi_scan_info *si,
 
 		if (err < 0)
 			return err;
-		else if (!err) {
-#ifdef CONFIG_BLB
-			err = add_to_list(si, pnum, ec, 1, &si->waiting);
-#else
+		else if (!err)
 			/* This corruption is caused by a power cut */
 			err = add_to_list(si, pnum, ec, 1, &si->erase);
-#endif
-		} else
+		else
 			/* This is an unexpected corruption */
 			err = add_corrupted(si, pnum, ec);
 		if (err)
@@ -989,21 +1011,14 @@ static int process_eb(struct ubi_device *ubi, struct ubi_scan_info *si,
 	}
 
 	vol_id = be32_to_cpu(vidh->vol_id);
-	if (vid)
-		*vid = vol_id;
-	if (sqnum)
-		*sqnum = be64_to_cpu(vidh->sqnum);
 	if (vol_id > UBI_MAX_VOLUMES && vol_id != UBI_LAYOUT_VOLUME_ID) {
 		int lnum = be32_to_cpu(vidh->lnum);
 
 		/* Unsupported internal volume */
 		switch (vidh->compat) {
 		case UBI_COMPAT_DELETE:
-			if (vol_id != UBI_FM_SB_VOLUME_ID
-			    && vol_id != UBI_FM_DATA_VOLUME_ID) {
-				ubi_msg("\"delete\" compatible internal volume %d:%d"
-					" found, will remove it", vol_id, lnum);
-			}
+			ubi_msg("\"delete\" compatible internal volume %d:%d"
+				" found, will remove it", vol_id, lnum);
 			err = add_to_list(si, pnum, ec, 1, &si->erase);
 			if (err)
 				return err;
@@ -1126,6 +1141,106 @@ static int check_what_we_have(struct ubi_device *ubi, struct ubi_scan_info *si)
 }
 
 /**
+ * ubi_scan - scan an MTD device.
+ * @ubi: UBI device description object
+ *
+ * This function does full scanning of an MTD device and returns complete
+ * information about it. In case of failure, an error code is returned.
+ */
+struct ubi_scan_info *ubi_scan(struct ubi_device *ubi)
+{
+	int err, pnum;
+	struct rb_node *rb1, *rb2;
+	struct ubi_scan_volume *sv;
+	struct ubi_scan_leb *seb;
+	struct ubi_scan_info *si;
+
+	si = kzalloc(sizeof(struct ubi_scan_info), GFP_KERNEL);
+	if (!si)
+		return ERR_PTR(-ENOMEM);
+
+	INIT_LIST_HEAD(&si->corr);
+	INIT_LIST_HEAD(&si->free);
+	INIT_LIST_HEAD(&si->erase);
+	INIT_LIST_HEAD(&si->alien);
+	si->volumes = RB_ROOT;
+
+	err = -ENOMEM;
+	si->scan_leb_slab = kmem_cache_create("ubi_scan_leb_slab",
+					      sizeof(struct ubi_scan_leb),
+					      0, 0, NULL);
+	if (!si->scan_leb_slab)
+		goto out_si;
+
+	ech = kzalloc(ubi->ec_hdr_alsize, GFP_KERNEL);
+	if (!ech)
+		goto out_si;
+
+	vidh = ubi_zalloc_vid_hdr(ubi, GFP_KERNEL);
+	if (!vidh)
+		goto out_ech;
+
+	for (pnum = 0; pnum < ubi->peb_count; pnum++) {
+		cond_resched();
+
+		dbg_gen("process PEB %d", pnum);
+		err = process_eb(ubi, si, pnum);
+		if (err < 0)
+			goto out_vidh;
+	}
+
+	dbg_msg("scanning is finished");
+
+	/* Calculate mean erase counter */
+	if (si->ec_count)
+		si->mean_ec = div_u64(si->ec_sum, si->ec_count);
+
+	err = check_what_we_have(ubi, si);
+	if (err)
+		goto out_vidh;
+
+	/*
+	 * In case of unknown erase counter we use the mean erase counter
+	 * value.
+	 */
+	ubi_rb_for_each_entry(rb1, sv, &si->volumes, rb) {
+		ubi_rb_for_each_entry(rb2, seb, &sv->root, u.rb)
+			if (seb->ec == UBI_SCAN_UNKNOWN_EC)
+				seb->ec = si->mean_ec;
+	}
+
+	list_for_each_entry(seb, &si->free, u.list) {
+		if (seb->ec == UBI_SCAN_UNKNOWN_EC)
+			seb->ec = si->mean_ec;
+	}
+
+	list_for_each_entry(seb, &si->corr, u.list)
+		if (seb->ec == UBI_SCAN_UNKNOWN_EC)
+			seb->ec = si->mean_ec;
+
+	list_for_each_entry(seb, &si->erase, u.list)
+		if (seb->ec == UBI_SCAN_UNKNOWN_EC)
+			seb->ec = si->mean_ec;
+
+	err = paranoid_check_si(ubi, si);
+	if (err)
+		goto out_vidh;
+
+	ubi_free_vid_hdr(ubi, vidh);
+	kfree(ech);
+
+	return si;
+
+out_vidh:
+	ubi_free_vid_hdr(ubi, vidh);
+out_ech:
+	kfree(ech);
+out_si:
+	ubi_scan_destroy_si(si);
+	return ERR_PTR(err);
+}
+
+/**
  * destroy_sv - free the scanning volume information
  * @sv: scanning volume information
  * @si: scanning information
@@ -1169,12 +1284,6 @@ void ubi_scan_destroy_si(struct ubi_scan_info *si)
 	struct ubi_scan_volume *sv;
 	struct rb_node *rb;
 
-#ifdef CONFIG_BLB
-	list_for_each_entry_safe(seb, seb_tmp, &si->waiting, u.list) {
-		list_del(&seb->u.list);
-		kmem_cache_free(si->scan_leb_slab, seb);
-	}
-#endif
 	list_for_each_entry_safe(seb, seb_tmp, &si->alien, u.list) {
 		list_del(&seb->u.list);
 		kmem_cache_free(si->scan_leb_slab, seb);
@@ -1218,309 +1327,6 @@ void ubi_scan_destroy_si(struct ubi_scan_info *si)
 		kmem_cache_destroy(si->scan_leb_slab);
 
 	kfree(si);
-}
-
-/**
- * ubi_scan - scan an MTD device.
- * @ubi: UBI device description object
- *
- * This function does full scanning of an MTD device and returns complete
- * information about it. In case of failure, an error code is returned.
- */
-int ubi_scan(struct ubi_device *ubi, struct ubi_scan_info *si,
-		    int start)
-{
-	int err, pnum;
-	struct rb_node *rb1, *rb2;
-	struct ubi_scan_volume *sv;
-	struct ubi_scan_leb *seb;
-
-	err = -ENOMEM;
-
-	ech = kzalloc(ubi->ec_hdr_alsize, GFP_KERNEL);
-	if (!ech)
-		goto out_si;
-
-	vidh = ubi_zalloc_vid_hdr(ubi, GFP_KERNEL);
-	if (!vidh)
-		goto out_ech;
-
-	for (pnum = start; pnum < ubi->peb_count; pnum++) {
-		cond_resched();
-
-		dbg_gen("process PEB %d", pnum);
-		err = process_eb(ubi, si, pnum, NULL, NULL);
-		if (err < 0)
-			goto out_vidh;
-	}
-
-	dbg_msg("scanning is finished");
-
-	/* Calculate mean erase counter */
-	if (si->ec_count) {
-		uint64_t sum = si->ec_sum; //MTK
-		si->mean_ec = div_u64(sum, si->ec_count);
-	}
-
-	err = check_what_we_have(ubi, si);
-	if (err)
-		goto out_vidh;
-
-	/*
-	 * In case of unknown erase counter we use the mean erase counter
-	 * value.
-	 */
-	ubi_rb_for_each_entry(rb1, sv, &si->volumes, rb) {
-		ubi_rb_for_each_entry(rb2, seb, &sv->root, u.rb)
-			if (seb->ec == UBI_SCAN_UNKNOWN_EC)
-				seb->ec = si->mean_ec;
-	}
-
-	list_for_each_entry(seb, &si->free, u.list) {
-		if (seb->ec == UBI_SCAN_UNKNOWN_EC)
-			seb->ec = si->mean_ec;
-	}
-
-	list_for_each_entry(seb, &si->corr, u.list)
-		if (seb->ec == UBI_SCAN_UNKNOWN_EC)
-			seb->ec = si->mean_ec;
-
-	list_for_each_entry(seb, &si->erase, u.list)
-		if (seb->ec == UBI_SCAN_UNKNOWN_EC)
-			seb->ec = si->mean_ec;
-
-	err = paranoid_check_si(ubi, si);
-	if (err)
-		goto out_vidh;
-
-	ubi_free_vid_hdr(ubi, vidh);
-	kfree(ech);
-
-	return 0;
-
-out_vidh:
-	ubi_free_vid_hdr(ubi, vidh);
-out_ech:
-	kfree(ech);
-out_si:
-	return err;
-}
-
-#ifdef CONFIG_MTD_UBI_FASTMAP
-
-/**
- * scan_fast - try to find a fastmap and attach from it.
- * @ubi: UBI device description object
- * @ai: attach info object
- *
- * Returns 0 on success, negative return values indicate an internal
- * error.
- * UBI_NO_FASTMAP denotes that no fastmap was found.
- * UBI_BAD_FASTMAP denotes that the found fastmap was invalid.
- */
-static int scan_fast(struct ubi_device *ubi, struct ubi_scan_info *ai)
-{
-	int err, pnum, fm_anchor = -1;
-	unsigned long long max_sqnum = 0;
-
-	err = -ENOMEM;
-
-	ech = kzalloc(ubi->ec_hdr_alsize, GFP_KERNEL);
-	if (!ech)
-		goto out;
-
-	vidh = ubi_zalloc_vid_hdr(ubi, GFP_KERNEL);
-	if (!vidh)
-		goto out_ech;
-
-	for (pnum = 0; pnum < UBI_FM_MAX_START; pnum++) {
-		int vol_id = -1;
-		unsigned long long sqnum = -1;
-		cond_resched();
-
-		dbg_gen("process PEB %d", pnum);
-		err = process_eb(ubi, ai, pnum, &vol_id, &sqnum);
-		if (err < 0)
-			goto out_vidh;
-
-		if (vol_id == UBI_FM_SB_VOLUME_ID && sqnum > max_sqnum) {
-			max_sqnum = sqnum;
-			fm_anchor = pnum;
-		}
-	}
-
-	ubi_free_vid_hdr(ubi, vidh);
-	kfree(ech);
-
-	if (fm_anchor < 0) {
-		printk("No fastmap vol\n");
-		return UBI_NO_FASTMAP;
-	}
-
-	return ubi_scan_fastmap(ubi, ai, fm_anchor);
-
-out_vidh:
-	ubi_free_vid_hdr(ubi, vidh);
-out_ech:
-	kfree(ech);
-out:
-	return err;
-}
-
-#endif
-
-static struct ubi_scan_info *alloc_ai(const char *slab_name)
-{
-	struct ubi_scan_info *ai;
-
-	ai = kzalloc(sizeof(struct ubi_scan_info), GFP_KERNEL);
-	if (!ai)
-		return ai;
-
-	INIT_LIST_HEAD(&ai->corr);
-	INIT_LIST_HEAD(&ai->free);
-	INIT_LIST_HEAD(&ai->erase);
-	INIT_LIST_HEAD(&ai->alien);
-#ifdef CONFIG_BLB
-	INIT_LIST_HEAD(&ai->waiting);
-#endif
-	ai->volumes = RB_ROOT;
-	ai->scan_leb_slab = kmem_cache_create(slab_name,
-			sizeof(struct ubi_scan_leb),
-			0, 0, NULL);
-	if (!ai->scan_leb_slab) {
-		kfree(ai);
-		ai = NULL;
-	}
-
-	return ai;
-}
-
-
-/**
- * attach_by_scanning - attach an MTD device using scanning method.
- * @ubi: UBI device descriptor
- * @force_scan: if set to non-zero attach by scanning
- *
- * This function returns zero in case of success and a negative error code in
- * case of failure.
- *
- * Note, currently this is the only method to attach UBI devices. Hopefully in
- * the future we'll have more scalable attaching methods and avoid full media
- * scanning. But even in this case scanning will be needed as a fall-back
- * attaching method if there are some on-flash table corruptions.
- */
-int attach_by_scanning(struct ubi_device *ubi, int force_scan)
-{
-	int err;
-	struct ubi_scan_info *si;
-	unsigned long long time = sched_clock();
-
-	si = alloc_ai("ubi_scan_leb_slab");
-	if (!si)
-		return -ENOMEM;
-
-#ifdef CONFIG_MTD_UBI_FASTMAP
-	/* On small flash devices we disable fastmap in any case. */
-	if ((int)mtd_div_by_eb(ubi->mtd->size, ubi->mtd) <= UBI_FM_MAX_START) {
-		ubi->fm_disabled = 1;
-		force_scan = 1;
-	}
-
-	if (force_scan)
-		err = ubi_scan(ubi, si, 0);
-	else {
-		err = scan_fast(ubi, si);
-		if (err > 0) {
-			if (err != UBI_NO_FASTMAP) {
-				ubi_scan_destroy_si(si);
-				si = alloc_ai("ubi_scan_lab_slab2");
-				if (!si)
-					return -ENOMEM;
-				err = ubi_scan(ubi, si, 0);
-			} else {
-				err = ubi_scan(ubi, si, UBI_FM_MAX_START);
-			}
-		}
-	}
-#else
-	err = ubi_scan(ubi, si, 0);
-#endif
-	time = sched_clock() - time;
-	do_div(time, 1000000);
-	printk("scan done in %lld(ms)\n", time);
-
-	if (err)
-		goto out_si;
-
-	ubi->bad_peb_count = si->bad_peb_count;
-	ubi->good_peb_count = ubi->peb_count - ubi->bad_peb_count;
-	ubi->corr_peb_count = si->corr_peb_count;
-	ubi->max_ec = si->max_ec;
-	ubi->mean_ec = si->mean_ec;
-	ubi->ec_sum = si->ec_sum + ubi->mean_ec * (ubi->good_peb_count - si->ec_count); //MTK: calc ec_sum
-	ubi_msg("max. sequence number:       %llu", si->max_sqnum);
-
-#ifdef CONFIG_BLB
-	ubi->scaning = 1;
-	err = ubi_backup_init_scan(ubi, si);
-	if (err)
-		goto out_si;
-	ubi->scaning = 0;
-#endif
-	err = ubi_read_volume_table(ubi, si);
-	if (err)
-		goto out_si;
-
-	time = sched_clock();
-	err = ubi_wl_init_scan(ubi, si);
-	if (err)
-		goto out_vtbl;
-
-	time = sched_clock() - time;
-	do_div(time, 1000000);
-	printk("ubi_wl_init_scan done in %lld(ms)\n", time);
-
-	err = ubi_eba_init_scan(ubi, si);
-	if (err)
-		goto out_wl;
-
-#ifdef CONFIG_MTD_UBI_FASTMAP
-#ifdef CONFIG_MTD_UBI_DEBUG
-        if (ubi->fm && ubi->dbg->chk_gen) 
-	{
-		struct ubi_scan_info *scan_ai;
-
-		scan_ai = alloc_ai("ubi_ckh_aeb_slab_cache");
-		if (!scan_ai)
-			goto out_wl;
-
-		err = ubi_scan(ubi, scan_ai, 0);
-		if (err) {
-			ubi_scan_destroy_si(scan_ai);
-			goto out_wl;
-		}
-
-		err = self_check_eba(ubi, si, scan_ai);
-		ubi_scan_destroy_si(scan_ai);
-
-		if (err)
-			goto out_wl;
-	}
-#endif
-#endif
-
-	ubi_scan_destroy_si(si);
-	return 0;
-
-out_wl:
-	ubi_wl_close(ubi);
-out_vtbl:
-	free_internal_volumes(ubi);
-	kfree(ubi->vtbl);
-out_si:
-	ubi_scan_destroy_si(si);
-	return err;
 }
 
 #ifdef CONFIG_MTD_UBI_DEBUG
@@ -1797,560 +1603,3 @@ out:
 }
 
 #endif /* CONFIG_MTD_UBI_DEBUG */
-
-#ifdef CONFIG_BLB
-/**
- * check_pattern - check if buffer contains only a certain byte pattern.
- * @buf: buffer to check
- * @patt: the pattern to check
- * @size: buffer size in bytes
- *
- * This function returns %1 in there are only @patt bytes in @buf, and %0 if
- * something else was also found.
- */
-enum
-{
-	RECOVERY_NONE = 0,
-	RECOVERY_FROM_VOLUME,
-	RECOVERY_FROM_CORR
-};
-
-static int check_pattern(const void *buf, uint8_t patt, int size)
-{
-	int i;
-
-	for (i = 0; i < size; i++)
-		if (((const uint8_t *)buf)[i] != patt)
-			return 0;
-	return 1;
-}
-
-/**
- * ubi_backup_search_empty - search first empty page in the block.
- * @ubi: ubi structure
- * @pnum: the pnum to search
- *
- * This function returns offset of first empty page in the block.
- */
-extern u32 mtk_nand_paired_page_transfer(u32, bool);
-extern int blb_get_startpage(void);
-static int ubi_backup_search_empty(const struct ubi_device *ubi, int pnum)
-{
-	int low, high, mid;
-	int first = ubi->peb_size;
-	int offset, err = 0;
-
-	low = blb_get_startpage();
-	high = ubi->peb_size/ubi->mtd->writesize -1;
-	while(low <= high)
-	{
-		mid = (low+high)/2;
-		offset = mid * ubi->mtd->writesize;
-		err = ubi_io_read_oob(ubi, ubi->databuf, ubi->oobbuf, pnum, offset);
-		if(err == 0 && check_pattern(ubi->oobbuf, 0xFF, ubi->mtd->oobavail) && check_pattern(ubi->databuf, 0xFF, ubi->mtd->writesize)) {
-			first = offset;
-			high = mid-1;
-		}
-		else {
-			low = mid+1;
-		}
-	}
-	return first;
-}
-
-int blb_recovery_peb(struct ubi_device *ubi, struct ubi_scan_info *si,
-		     struct ubi_blb_spare *p_blb_spare, int pnum, int num,
-		     int backup_pnum, struct ubi_scan_leb *cad_peb)
-{
-	struct ubi_scan_volume *sv;
-	int i, err, data_size, offset, tries = 0;
-	struct ubi_scan_leb *old_seb, *new_seb=NULL;
-	struct rb_node *rb;
-	int recovery = RECOVERY_NONE;
-	int source_vol_id, source_lnum, source_pnum, source_page;
-	uint32_t crc;
-	struct ubi_vid_hdr *vid_hdr = NULL;
-
-	source_page = be16_to_cpu(p_blb_spare->page);
-	source_vol_id = be32_to_cpu(p_blb_spare->vol_id);
-	source_pnum = be16_to_cpu(p_blb_spare->pnum);
-	source_lnum = be16_to_cpu(p_blb_spare->lnum);
-
-	sv = ubi_scan_find_sv(si, source_vol_id);
-	if (!sv) {
-		ubi_msg("volume id %d was not found", source_vol_id);
-		err = -EINVAL;
-		goto out_free;
-	}
-
-	// check from volume
-	ubi_rb_for_each_entry(rb, old_seb, &sv->root, u.rb)
-		if( old_seb->pnum == source_pnum && old_seb->lnum == source_lnum) {
-			recovery = RECOVERY_FROM_VOLUME;
-			goto recovery;
-		}
-
-	list_for_each_entry(old_seb, &si->corr, u.list)
-		if (old_seb->pnum == source_pnum) {
-			recovery = RECOVERY_FROM_CORR;
-			list_del(&old_seb->u.list);
-			goto recovery;
-			break;
-		}
-	list_for_each_entry(old_seb, &si->waiting, u.list)
-		if (old_seb->pnum == source_pnum) {
-			recovery = RECOVERY_FROM_CORR;
-			list_del(&old_seb->u.list);
-			goto recovery;
-			break;
-		}
-
-	list_for_each_entry(old_seb, &si->free, u.list)
-		if (old_seb->pnum == source_pnum) {
-			list_del(&old_seb->u.list);
-			ubi_msg("add corrept peb %d, ec %d from free to erase list", old_seb->pnum, old_seb->ec);
-			err = add_to_list(si, old_seb->pnum, old_seb->ec, 1, &si->erase);
-			if (err)
-				return err;
-			kmem_cache_free(si->scan_leb_slab, old_seb);
-			break;
-		}
-
-	list_for_each_entry(old_seb, &si->alien, u.list)
-		if (old_seb->pnum == source_pnum) {
-			list_del(&old_seb->u.list);
-			ubi_msg("add corrept peb %d, ec %d from alien to erase list", old_seb->pnum, old_seb->ec);
-			err = add_to_list(si, old_seb->pnum, old_seb->ec, 1, &si->erase);
-			if (err)
-				return err;
-			kmem_cache_free(si->scan_leb_slab, old_seb);
-			break;
-		}
-	if(cad_peb != NULL)
-		kmem_cache_free(si->scan_leb_slab, cad_peb);
-	return 0;
-
-recovery:
-	ubi_msg("recovery from %d", recovery);
-	data_size = ubi->leb_size - be32_to_cpu(sv->data_pad);
-	for(offset=0 ; offset<data_size; offset+=ubi->mtd->writesize) {
-		//ubi_msg("read source(%d) from %d, %d bytes", old_seb->pnum, offset, ubi->mtd->writesize);
-		err = ubi_io_read_data(ubi, (void*)(((char*)ubi->peb_buf)+offset),
-				old_seb->pnum, offset, ubi->mtd->writesize);
-		if(err < 0)
-			ubi_warn("error %d while reading data from PEB %d:0x%x", err, old_seb->pnum, offset);
-	}
-
-	for(i=0 ; i<num ; i++) {
-		ubi_msg("read backup(%d) from %d", pnum, ubi->next_offset[0]-(i+1)*ubi->mtd->writesize);
-		err = ubi_io_read_oob(ubi, ubi->databuf, ubi->oobbuf, pnum, ubi->next_offset[0]-(i+1)*ubi->mtd->writesize);
-		source_page = be16_to_cpu(p_blb_spare->page);
-		if(source_page >= ubi->leb_start/ubi->mtd->writesize) {
-			ubi_msg("copy backup page %d to offset 0x%x", source_page, (source_page*ubi->mtd->writesize)-ubi->leb_start);
-			memcpy((void *) (((char*)ubi->peb_buf)+(source_page*ubi->mtd->writesize)-ubi->leb_start),
-					(const void *)ubi->databuf, ubi->mtd->writesize);
-		}
-	}
-
-	data_size = ubi_calc_data_len(ubi, (char*)ubi->peb_buf, data_size);
-	ubi_msg("calc CRC data size %d", data_size);
-	crc = crc32(UBI_CRC32_INIT, (char*)ubi->peb_buf, data_size);
-
-	vid_hdr = ubi_zalloc_vid_hdr(ubi, GFP_KERNEL);
-	if (!vid_hdr) {
-		err = -ENOMEM;
-		goto out_free;
-	}
-
-	vid_hdr->sqnum = cpu_to_be64(++si->max_sqnum);
-	vid_hdr->vol_id = cpu_to_be32(source_vol_id);
-	vid_hdr->lnum = cpu_to_be32(source_lnum);
-	vid_hdr->compat = ubi_get_compat(ubi, source_vol_id);
-	vid_hdr->data_pad = cpu_to_be32(sv->data_pad);
-	vid_hdr->used_ebs = 0;
-	if(sv->used_ebs != 0) {
-		ubi_msg("bad used_ebs 0x%x", sv->used_ebs);
-	}
-	vid_hdr->vol_type = UBI_VID_DYNAMIC;
-	if (data_size > 0) {
-		vid_hdr->copy_flag = 1;
-		vid_hdr->data_size = cpu_to_be32(data_size);
-		vid_hdr->data_crc = cpu_to_be32(crc);
-	}
-
-retry:
-	if(tries == 0 &&  cad_peb != NULL) {
-		new_seb = cad_peb;
-	} else {
-		new_seb = ubi_scan_get_free_peb(ubi, si);
-		if (IS_ERR(new_seb)) {
-			err = -EINVAL;
-			goto out_free;
-		}
-
-		if(backup_pnum == UBI_LEB_UNMAPPED) {
-			ubi_warn("no leb 1 for backup page 1 of recovery PEB");
-		} else if((ubi->peb_size-ubi->next_offset[1]) < ubi->mtd->writesize) {
-			ubi_warn("no space to backup page 1 of recovery PEB");
-		} else {
-			struct ubi_blb_spare *blb_spare = (struct ubi_blb_spare *)ubi->oobbuf;
-			blb_spare->num = cpu_to_be16(1);
-			blb_spare->pnum = cpu_to_be16(new_seb->pnum);
-			blb_spare->lnum = cpu_to_be16(source_lnum);
-			blb_spare->vol_id = cpu_to_be32(source_vol_id);
-			blb_spare->page = cpu_to_be16(1);
-			blb_spare->sqnum = cpu_to_be64(++si->max_sqnum);
-			crc = crc32(UBI_CRC32_INIT, blb_spare, sizeof(struct ubi_blb_spare)-4);
-			blb_spare->crc = cpu_to_be32(crc);
-
-			sprintf(ubi->databuf, "VIDVIDVID");
-			err = ubi_io_write_oob(ubi, ubi->databuf, ubi->oobbuf, backup_pnum, ubi->next_offset[1]);
-			if(err)
-				ubi_err("ERROR: write backup page 1 of recovery PEB fail");
-			else
-				ubi_msg("backup[1] %d:%d to %d:%d, num %d", new_seb->pnum, 1, backup_pnum,
-						ubi->next_offset[1]/ubi->mtd->writesize, 1);
-
-			ubi->next_offset[1] += ubi->mtd->writesize;
-		}
-	}
-	ubi_msg("using peb %d to recovery", new_seb->pnum);
-	err = ubi_io_write_vid_hdr(ubi, new_seb->pnum, vid_hdr);
-	if (err)
-		goto write_error;
-
-	if (data_size > 0) {
-		err = ubi_io_write_data(ubi, ubi->peb_buf, new_seb->pnum, 0, data_size);
-		if (err)
-			goto write_error;
-	}
-
-	err = add_to_list(si, old_seb->pnum, old_seb->ec, 1, &si->erase);
-	if (err)
-		goto out_free;
-
-	if( recovery == RECOVERY_FROM_VOLUME ) {
-		old_seb->pnum = new_seb->pnum;
-		old_seb->ec = new_seb->ec;
-		old_seb->sqnum = vid_hdr->sqnum;
-	} else {
-		err = ubi_scan_add_used(ubi, si, new_seb->pnum, new_seb->ec, vid_hdr, 0);
-		if (err)
-			goto out_free;
-	}
-	kmem_cache_free(si->scan_leb_slab, new_seb);
-	ubi_free_vid_hdr(ubi, vid_hdr);
-
-	return 0;
-
-write_error:
-	if (err != -EIO || !ubi->bad_allowed) {
-		ubi_ro_mode(ubi);
-		kmem_cache_free(si->scan_leb_slab, new_seb);
-		goto out_free;
-	}
-
-	err = add_to_list(si, new_seb->pnum, new_seb->pnum, 1,
-			&si->corr);
-	kmem_cache_free(si->scan_leb_slab, new_seb);
-	if (err || ++tries > UBI_IO_RETRIES) {
-		ubi_ro_mode(ubi);
-		goto out_free;
-	}
-
-	vid_hdr->sqnum = cpu_to_be64(++si->max_sqnum);
-	ubi_msg("try another PEB");
-	goto retry;
-
-out_free:
-	if(vid_hdr)
-		ubi_free_vid_hdr(ubi, vid_hdr);
-	return err;
-}
-
-int ubi_backup_init_scan(struct ubi_device *ubi, struct ubi_scan_info *si)
-{
-	int i, j, err = 0;
-	struct ubi_vid_hdr *vid_hdr = NULL;
-	struct ubi_scan_volume *sv;
-	struct ubi_scan_leb *seb, *backup_seb[2], *old_seb; //, *new_seb;
-	struct rb_node *rb;
-	struct ubi_blb_spare *p_blb_spare;
-	int pnum = 0;
-	int page_cnt;
-	int source_pnum = 0, source_lnum = 0, source_vol_id = 0, source_page = 0, num = 0;
-	int corrupt; //, recovery, tries = 0;
-	//int data_size;
-	uint32_t crc;
-	struct ubi_scan_leb *seb_tmp;
-	struct ubi_scan_leb *candidate_peb = NULL;
-	int high_page;
-
-	page_cnt = (1<<(ubi->mtd->erasesize_shift-ubi->mtd->writesize_shift));
-
-	ubi->databuf = kmalloc(ubi->mtd->writesize, GFP_KERNEL);
-	ubi->oobbuf = kmalloc(ubi->mtd->oobavail, GFP_KERNEL);
-	if(!ubi->databuf || !ubi->oobbuf) {
-		err = -ENOMEM;
-		goto out_free;
-	}
-	ubi->leb_scrub[0] = 0;
-	ubi->leb_scrub[1] = 0;
-	ubi->next_offset[0] = 0;
-	ubi->next_offset[1] = 0;
-	backup_seb[0] = NULL;
-	backup_seb[1] = NULL;
-	mutex_init(&ubi->blb_mutex);
-
-	sv = ubi_scan_find_sv(si, UBI_BACKUP_VOLUME_ID);
-	if (!sv) {
-		ubi_msg("blb the backup volume was not found");
-		return 0;
-	}
-
-	ubi_msg("blb check backup volume(0x%x):%d", UBI_BACKUP_VOLUME_ID, sv->vol_id);
-
-	p_blb_spare = (struct ubi_blb_spare *)ubi->oobbuf;
-	/* Get two PEBs of backup volume */
-	ubi_rb_for_each_entry(rb, seb, &sv->root, u.rb) {
-		int lnum = seb->lnum;
-		ubi_assert(lnum <2);
-		backup_seb[lnum] = seb;
-		ubi->next_offset[lnum] = ubi_backup_search_empty(ubi, seb->pnum);
-	}
-	/* check sqnum */
-	if(backup_seb[0] != NULL && backup_seb[1] != NULL) {
-		int peb0=-1, peb1=-1;
-		unsigned long long sqnum0, sqnum1;
-
-		pnum = backup_seb[0]->pnum;
-		ubi_msg("blb block %d, pnum %d next offset 0x%x(page %d)", 0, pnum, ubi->next_offset[0], ubi->next_offset[0]/ubi->mtd->writesize);
-		err = ubi_io_read_oob(ubi, NULL, ubi->oobbuf, pnum, ubi->next_offset[0]-ubi->mtd->writesize);
-		if(err < 0) {
-			ubi_msg("blb this page of LEB0 was scrubbed or WL");
-			backup_seb[0] = NULL;
-		} else {
-			crc = crc32(UBI_CRC32_INIT, p_blb_spare, sizeof(struct ubi_blb_spare)-4);
-			if(crc != be32_to_cpu(p_blb_spare->crc)) {
-				ubi_msg("blb this page of LEB0 crc error");
-				backup_seb[0] = NULL;
-			} else {
-				peb0 = be16_to_cpu(p_blb_spare->pnum);
-				sqnum0 = be64_to_cpu(p_blb_spare->sqnum);
-				if (si->max_sqnum < sqnum0)
-					si->max_sqnum = sqnum0;
-			}
-		}
-
-		pnum = backup_seb[1]->pnum;
-		ubi_msg("blb block %d, pnum %d next offset 0x%x(page %d)", 1, pnum, ubi->next_offset[1], ubi->next_offset[1]/ubi->mtd->writesize);
-		err = ubi_io_read_oob(ubi, NULL, ubi->oobbuf, pnum, ubi->next_offset[1]-ubi->mtd->writesize);
-		if(err < 0) {
-			ubi_msg("blb this page of LEB1 was scrubbed or WL");
-			backup_seb[1] = NULL;
-		} else {
-			crc = crc32(UBI_CRC32_INIT, p_blb_spare, sizeof(struct ubi_blb_spare)-4);
-			if(crc != be32_to_cpu(p_blb_spare->crc)) {
-				ubi_msg("blb this page of LEB0 crc error");
-				backup_seb[1] = NULL;
-			} else {
-				peb1 = be16_to_cpu(p_blb_spare->pnum);
-				sqnum1 = be64_to_cpu(p_blb_spare->sqnum);
-				if (si->max_sqnum < sqnum1)
-					si->max_sqnum = sqnum1;
-			}	
-		}
-
-		if(peb0 == peb1 && peb0!=-1) {
-			ubi_msg("blb two record have the same peb %d", peb0);
-			if(sqnum1 > sqnum0) {
-				ubi_msg("blb LEB1 is new %d", peb0);
-				backup_seb[0] = NULL;
-			} else {
-				ubi_msg("blb LEB0 is new %d", peb0);
-				backup_seb[1] = NULL;
-			}
-		}
-	}
-	
-	for(j=1;j>=0;j--) {
-		if(backup_seb[j] == NULL)
-			continue;
-
-		pnum = backup_seb[j]->pnum;
-		ubi_msg("blb block %d, pnum %d next offset 0x%x(page %d)", j, pnum, ubi->next_offset[j], ubi->next_offset[j]/ubi->mtd->writesize);
-		err = ubi_io_read_oob(ubi, ubi->databuf, ubi->oobbuf, pnum, ubi->next_offset[j]-ubi->mtd->writesize);
-		if (err >= 0) {
-			source_page = be16_to_cpu(p_blb_spare->page);
-			num = be16_to_cpu(p_blb_spare->num);
-			source_vol_id = be32_to_cpu(p_blb_spare->vol_id);
-			source_pnum = be16_to_cpu(p_blb_spare->pnum);
-			source_lnum = be16_to_cpu(p_blb_spare->lnum);
-			crc = crc32(UBI_CRC32_INIT, p_blb_spare, sizeof(struct ubi_blb_spare)-4);
-			if(crc != be32_to_cpu(p_blb_spare->crc)) {
-				ubi_msg("blb this page crc error");
-				continue;
-			} else {
-				ubi_msg("blb this page crc match");
-			}
-		} else {
-			ubi_msg("blb this page was scrubbed or WL");
-			ubi->leb_scrub[j] = 1;
-			continue;
-		}
-
-		ubi_msg("blb Spare Strut page: %X, num: %X, vol_id: %X, pnum: %X, lnum: %X",
-				p_blb_spare->page, p_blb_spare->num, p_blb_spare->vol_id,
-				p_blb_spare->pnum, p_blb_spare->lnum);
-
-		ubi_msg("blb backup @pnum %d, offset %d", pnum, ubi->next_offset[j]);
-		ubi_msg("blb backup source @pnum %d, lnum %d, vol_id %d, page %d, sq %d",
-				source_pnum, source_lnum, source_vol_id, source_page, num);
-
-		if(p_blb_spare->page==0xFFFF && p_blb_spare->num==0xFFFF &&
-				p_blb_spare->vol_id==0xFFFFFFFF && p_blb_spare->pnum==0xFFFF &&
-				p_blb_spare->lnum==0xFFFF) {
-
-			ubi_msg("blb the backup volume was scrubbed or WL, no need to restore");
-			continue;
-		}
-		// Check if source page corrupts, and recover
-		corrupt = 0;
-		for(i=0 ; i<num ; i++) {
-			// read backup page
-			ubi_msg("blb check backup @pnum %d, offset 0x%x", pnum, ubi->next_offset[j]-(i+1)*ubi->mtd->writesize);
-			if(i>0) {
-				err = ubi_io_read_oob(ubi, ubi->databuf, ubi->oobbuf, pnum, ubi->next_offset[j]-(i+1)*ubi->mtd->writesize);
-				if(err < 0)
-				{
-					corrupt = 0;
-					ubi_msg("blb this page was scrubbed or WL");
-					ubi->leb_scrub[j] = 1;
-					break;
-				}
-				source_page = be16_to_cpu(p_blb_spare->page);
-				source_vol_id = be32_to_cpu(p_blb_spare->vol_id);
-				source_pnum = be16_to_cpu(p_blb_spare->pnum);
-				source_lnum = be16_to_cpu(p_blb_spare->lnum);
-			}
-
-			if(source_page == 1) {
-				char *buf = ubi->databuf;
-				ubi_msg("databuf %c%c%c%c%c%c%c%c%c", buf[0], buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7], buf[8]);
-				if(strncmp("VIDVIDVID", ubi->databuf, 9) == 0) {
-					int check_page = 2;
-					if(source_vol_id == UBI_BACKUP_VOLUME_ID) {
-						check_page = blb_get_startpage();
-					}
-					ubi_msg("vid special case, checking page %d", check_page);
-					err = ubi_io_read_oob(ubi, ubi->databuf, NULL, source_pnum, check_page*ubi->mtd->writesize);
-					err = ubi_check_pattern(ubi->databuf, 0xFF, ubi->mtd->writesize);
-					if (err == 1) {
-						ubi_msg("Page 2(%d) are all 0xFF", source_pnum);
-						corrupt = 2;
-						break;
-					}
-					continue;
-				}
-			}
-			// read source page
-			ubi_msg("check source @pnum %d, offset 0x%x", source_pnum, source_page*ubi->mtd->writesize);
-			err = ubi_io_read_oob(ubi, ubi->databuf, NULL, source_pnum, source_page*ubi->mtd->writesize);
-			ubi_msg("checked source @pnum %d, offset 0x%x, ret %d", source_pnum, source_page*ubi->mtd->writesize, err);
-			if(err < 0 || err == UBI_IO_BITFLIPS) {
-				ubi_msg("source @pnum %d, offset 0x%x correct/bitflips =%d", source_pnum, source_page*ubi->mtd->writesize, err);
-				corrupt = 1;
-				break;
-			}
-			// read high page
-			high_page = mtk_nand_paired_page_transfer(source_page, false);
-			ubi_msg("check high @pnum %d, offset 0x%x", source_pnum, high_page*ubi->mtd->writesize);
-			err = ubi_io_read_oob(ubi, ubi->databuf, NULL, source_pnum, high_page*ubi->mtd->writesize);
-			ubi_msg("checked high @pnum %d, offset 0x%x, ret %d", source_pnum, high_page*ubi->mtd->writesize, err);
-			if(err < 0 || err == UBI_IO_BITFLIPS) {
-				ubi_msg("high @pnum %d, offset 0x%x correct/bitflips =%d", source_pnum, high_page*ubi->mtd->writesize, err);
-				corrupt = 1;
-				break;
-			}
-			if(check_pattern(ubi->databuf, 0xFF, ubi->mtd->writesize)==1) {
-				ubi_msg("high pare are empty");
-				corrupt = 1;
-				break;
-			} else {
-				ubi_msg("high pare has content");
-			}
-		}
-		if(corrupt == 1) {
-			int backup_pnum = UBI_LEB_UNMAPPED;
-			ubi_msg("corrupt %d", corrupt);
-			if(backup_seb[1]!=NULL)
-				backup_pnum = backup_seb[1]->pnum;
-			blb_recovery_peb(ubi, si, p_blb_spare, pnum, num, backup_pnum, candidate_peb);
-			candidate_peb = NULL;
-		} else if(corrupt == 2) {
-			sv = ubi_scan_find_sv(si, source_vol_id);
-			if (!sv) {
-				ubi_msg("volume id %d was not found", source_vol_id);
-			} else {
-				ubi_rb_for_each_entry(rb, old_seb, &sv->root, u.rb) {
-					if( old_seb->pnum == source_pnum) {
-						rb_erase(&old_seb->u.rb, &sv->root);
-						ubi_msg("candidate peb %d", old_seb->pnum);
-						candidate_peb = old_seb;
-						break;
-					}
-				}
-			}
-			list_for_each_entry(old_seb, &si->free, u.list)
-				if (old_seb->pnum == source_pnum) {
-					list_del(&old_seb->u.list);
-					ubi_msg("candidate peb %d", old_seb->pnum);
-					candidate_peb = old_seb;
-					break;
-				}
-			list_for_each_entry(old_seb, &si->corr, u.list)
-				if (old_seb->pnum == source_pnum) {
-					list_del(&old_seb->u.list);
-					ubi_msg("candidate peb %d", old_seb->pnum);
-					candidate_peb = old_seb;
-					break;
-				}
-			if(candidate_peb != NULL) {
-				ubi_msg("erasing candidate peb %d", candidate_peb->pnum);
-				err = ubi_scan_erase_peb(ubi, si, candidate_peb->pnum, candidate_peb->ec+1);
-				if (err) {
-					ubi_msg("erasing candidate peb %d fail %d", candidate_peb->pnum, err);
-					add_to_list(si, old_seb->pnum, old_seb->ec, 1, &si->erase);
-					kmem_cache_free(si->scan_leb_slab, candidate_peb);
-					candidate_peb = NULL;
-				}
-				candidate_peb->ec++;
-			}
-
-		}
-	}
-	if(candidate_peb != NULL) {
-		ubi_msg("candidate peb %d doesn't be used, add to free list", candidate_peb->pnum);
-		add_to_list(si, candidate_peb->pnum, candidate_peb->ec, 1, &si->free);
-		kmem_cache_free(si->scan_leb_slab, candidate_peb);
-	}
-	list_for_each_entry_safe(old_seb, seb_tmp, &si->waiting, u.list) {
-		list_del(&old_seb->u.list);
-		ubi_msg("move to erase from waiting: PEB %d, EC %d", old_seb->pnum, old_seb->ec);
-		err = add_to_list(si, old_seb->pnum, old_seb->ec, 1, &si->erase);
-		kmem_cache_free(si->scan_leb_slab, old_seb);
-	}
-	return 0;
-
-out_free:
-	if(ubi->databuf)
-		kfree(ubi->databuf);
-	if(ubi->oobbuf)
-		kfree(ubi->oobbuf);
-	if(vid_hdr)
-		ubi_free_vid_hdr(ubi, vid_hdr);
-
-	return err;
-}
-#endif
-

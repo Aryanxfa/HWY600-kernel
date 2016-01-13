@@ -288,13 +288,6 @@ static int ubifs_create(struct inode *dir, struct dentry *dentry, umode_t mode,
 	err = ubifs_jnl_update(c, dir, &dentry->d_name, inode, 0, 0);
 	if (err)
 		goto out_cancel;
-	err = ubifs_init_security(dir, inode, &dentry->d_name);
-	if (err) {
-		ubifs_err("cannot initialize extended attribute, error %d",
-			  err);
-		goto out_cancel;
-	}
-
 	mutex_unlock(&dir_ui->ui_mutex);
 
 	ubifs_release_budget(c, &req);
@@ -598,27 +591,6 @@ static int ubifs_unlink(struct inode *dir, struct dentry *dentry)
 	int err, budgeted = 1;
 	struct ubifs_budget_req req = { .mod_dent = 1, .dirtied_ino = 2 };
 	unsigned int saved_nlink = inode->i_nlink;
-	/* MTK start 
-	 * add log to delete xattr
-	*/
-	union ubifs_key key;
-	struct qstr nm = { .name = NULL };
-
-	lowest_xent_key(c, &key, inode->i_ino);
-	while(1){
-		struct ubifs_dent_node *xent;
-
-		xent = ubifs_tnc_next_ent(c, &key, &nm);
-		if (IS_ERR(xent)) {
-                        err = PTR_ERR(xent);
-			//ubifs_err("err %d\n", err);
-			break;
-                }
-		//ubifs_err("remove xattr %s\n", xent->name);
-		ubifs_removexattr(dentry, xent->name);
-		kfree(xent);
-	}
-	/* MTK end */
 
 	/*
 	 * Budget request settings: deletion direntry, deletion inode (+1 for
@@ -802,13 +774,6 @@ static int ubifs_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode)
 		ubifs_err("cannot create directory, error %d", err);
 		goto out_cancel;
 	}
-	err = ubifs_init_security(dir, inode, &dentry->d_name);
-	if (err) {
-		ubifs_err("cannot initialize extended attribute, error %d",
-			  err);
-		goto out_cancel;
-	}
-
 	mutex_unlock(&dir_ui->ui_mutex);
 
 	ubifs_release_budget(c, &req);
@@ -885,13 +850,6 @@ static int ubifs_mknod(struct inode *dir, struct dentry *dentry,
 	err = ubifs_jnl_update(c, dir, &dentry->d_name, inode, 0, 0);
 	if (err)
 		goto out_cancel;
-	err = ubifs_init_security(dir, inode, &dentry->d_name);
-	if (err) {
-		ubifs_err("cannot initialize extended attribute, error %d",
-			  err);
-		goto out_cancel;
-	}
-
 	mutex_unlock(&dir_ui->ui_mutex);
 
 	ubifs_release_budget(c, &req);
@@ -968,13 +926,6 @@ static int ubifs_symlink(struct inode *dir, struct dentry *dentry,
 	err = ubifs_jnl_update(c, dir, &dentry->d_name, inode, 0, 0);
 	if (err)
 		goto out_cancel;
-	err = ubifs_init_security(dir, inode, &dentry->d_name);
-	if (err) {
-		ubifs_err("cannot initialize extended attribute, error %d",
-			  err);
-		goto out_cancel;
-	}
-
 	mutex_unlock(&dir_ui->ui_mutex);
 
 	ubifs_release_budget(c, &req);

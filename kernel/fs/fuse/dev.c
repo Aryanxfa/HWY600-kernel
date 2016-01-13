@@ -7,7 +7,6 @@
 */
 
 #include "fuse_i.h"
-#include "fuse.h"
 
 #include <linux/init.h>
 #include <linux/module.h>
@@ -17,7 +16,6 @@
 #include <linux/pagemap.h>
 #include <linux/file.h>
 #include <linux/slab.h>
-#include <linux/freezer.h>
 #include <linux/pipe_fs_i.h>
 #include <linux/swap.h>
 #include <linux/splice.h>
@@ -413,11 +411,8 @@ __acquires(fc->lock)
 	}
 }
 
-void fuse_request_send_ex(struct fuse_conn *fc, struct fuse_req *req,
-    __u32 size)
+void fuse_request_send(struct fuse_conn *fc, struct fuse_req *req)
 {
-	FUSE_IOLOG_INIT();
-	FUSE_IOLOG_START();
 	req->isreply = 1;
 	spin_lock(&fc->lock);
 	if (!fc->connected)
@@ -434,14 +429,6 @@ void fuse_request_send_ex(struct fuse_conn *fc, struct fuse_req *req,
 		request_wait_answer(fc, req);
 	}
 	spin_unlock(&fc->lock);
-	FUSE_IOLOG_END();
-	FUSE_IOLOG_PRINT(size, req->in.h.opcode);
-}
-EXPORT_SYMBOL_GPL(fuse_request_send_ex);
-
-void fuse_request_send(struct fuse_conn *fc, struct fuse_req *req)
-{
-    fuse_request_send_ex(fc, req, 0);
 }
 EXPORT_SYMBOL_GPL(fuse_request_send);
 
@@ -473,21 +460,10 @@ static void fuse_request_send_nowait(struct fuse_conn *fc, struct fuse_req *req)
 	}
 }
 
-void fuse_request_send_background_ex(struct fuse_conn *fc, struct fuse_req *req,
-    __u32 size)
-{
-	FUSE_IOLOG_INIT();
-	FUSE_IOLOG_START();
-	req->isreply = 1;
-	fuse_request_send_nowait(fc, req);
-	FUSE_IOLOG_END();
-	FUSE_IOLOG_PRINT(size, req->in.h.opcode);
-}
-EXPORT_SYMBOL_GPL(fuse_request_send_background_ex);
-
 void fuse_request_send_background(struct fuse_conn *fc, struct fuse_req *req)
 {
-    fuse_request_send_background_ex(fc, req, 0);
+	req->isreply = 1;
+	fuse_request_send_nowait(fc, req);
 }
 EXPORT_SYMBOL_GPL(fuse_request_send_background);
 
@@ -1134,8 +1110,6 @@ static ssize_t fuse_dev_do_read(struct fuse_conn *fc, struct file *file,
 	struct fuse_req *req;
 	struct fuse_in *in;
 	unsigned reqsize;
-
-	FUSE_MIGHT_FREEZE(file->f_mapping->host->i_sb, "fuse_dev_read");
 
  restart:
 	spin_lock(&fc->lock);
@@ -1833,9 +1807,6 @@ static ssize_t fuse_dev_write(struct kiocb *iocb, const struct iovec *iov,
 	struct fuse_conn *fc = fuse_get_conn(iocb->ki_filp);
 	if (!fc)
 		return -EPERM;
-
-	FUSE_MIGHT_FREEZE(iocb->ki_filp->f_mapping->host->i_sb,
-			"fuse_dev_write");
 
 	fuse_copy_init(&cs, fc, 0, iov, nr_segs);
 

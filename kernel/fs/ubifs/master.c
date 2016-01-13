@@ -74,9 +74,6 @@ static int scan_for_master(struct ubifs_info *c)
 		   UBIFS_MST_NODE_SZ - UBIFS_CH_SZ))
 		goto out;
 	c->mst_offs = offs;
-	/* MTK force recovery master node when ECC error */
-	if(sleb->ecc == 1)
-		goto out;
 	ubifs_scan_destroy(sleb);
 	return 0;
 
@@ -382,7 +379,7 @@ int ubifs_write_master(struct ubifs_info *c)
 	c->mst_offs = offs;
 	c->mst_node->highest_inum = cpu_to_le64(c->highest_inum);
 
-	err = ubifs_write_node(c, c->mst_node, len, lnum, offs);
+	err = ubifs_write_node(c, c->mst_node, len, lnum, offs, UBI_SHORTTERM);
 	if (err)
 		return err;
 
@@ -393,7 +390,7 @@ int ubifs_write_master(struct ubifs_info *c)
 		if (err)
 			return err;
 	}
-	err = ubifs_write_node(c, c->mst_node, len, lnum, offs);
+	err = ubifs_write_node(c, c->mst_node, len, lnum, offs, UBI_SHORTTERM);
 
 	return err;
 }

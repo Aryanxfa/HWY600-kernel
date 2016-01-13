@@ -427,9 +427,6 @@ static int tnc_read_node_nm(struct ubifs_info *c, struct ubifs_zbranch *zbr,
 	err = lnc_add(c, zbr, node);
 	return err;
 }
-#if defined(FEATURE_UBIFS_PERF_INDEX)
-extern void ubifs_perf_lrcount(unsigned long long usage, unsigned int len);
-#endif
 
 /**
  * try_read_node - read a node if it is a node.
@@ -461,22 +458,15 @@ static int try_read_node(const struct ubifs_info *c, void *buf, int type,
 	int err, node_len;
 	struct ubifs_ch *ch = buf;
 	uint32_t crc, node_crc;
-#if defined(FEATURE_UBIFS_PERF_INDEX)
-	unsigned long long time1 = sched_clock();
-#endif
+
 	dbg_io("LEB %d:%d, %s, length %d", lnum, offs, dbg_ntype(type), len);
 
 	err = ubifs_leb_read(c, lnum, buf, offs, len, 1);
 	if (err) {
 		ubifs_err("cannot read node type %d from LEB %d:%d, error %d",
 			  type, lnum, offs, err);
-		//return err;
+		return err;
 	}
-#if defined(FEATURE_UBIFS_PERF_INDEX)
-	if(type == UBIFS_DATA_NODE) {
-		ubifs_perf_lrcount(sched_clock() - time1, len);
-	}
-#endif
 
 	if (le32_to_cpu(ch->magic) != UBIFS_NODE_MAGIC)
 		return 0;
@@ -2700,7 +2690,6 @@ int ubifs_tnc_remove_ino(struct ubifs_info *c, ino_t inum)
 
 	dbg_tnc("ino %lu", (unsigned long)inum);
 
-#if 0   /* MTK no need anymore*/
 	/*
 	 * Walk all extended attribute entries and remove them together with
 	 * corresponding extended attribute inodes.
@@ -2742,7 +2731,6 @@ int ubifs_tnc_remove_ino(struct ubifs_info *c, ino_t inum)
 		pxent = xent;
 		key_read(c, &xent->key, &key1);
 	}
-#endif
 
 	kfree(pxent);
 	lowest_ino_key(c, &key1, inum);

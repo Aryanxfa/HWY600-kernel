@@ -25,7 +25,6 @@
 #include "sd.h"
 #include "sd_ops.h"
 
-u32 g_u32_cid[4]={0};
 static const unsigned int tran_exp[] = {
 	10000,		100000,		1000000,	10000000,
 	0,		0,		0,		0
@@ -511,7 +510,6 @@ static int sd_set_bus_speed_mode(struct mmc_card *card, u8 *status)
 {
 	int err;
 	unsigned int timing = 0;
-	int retry = 3;
 
 	switch (card->sd_bus_speed) {
 	case UHS_SDR104_BUS_SPEED:
@@ -537,19 +535,14 @@ static int sd_set_bus_speed_mode(struct mmc_card *card, u8 *status)
 	default:
 		return 0;
 	}
-reswitch:
+
 	err = mmc_sd_switch(card, 1, 0, card->sd_bus_speed, status);
 	if (err)
 		return err;
-	printk(KERN_WARNING "msdc status[16] & 0xF = 0x%x bus_speed = 0x%x\n",(status[16] & 0xF),card->sd_bus_speed);
 
-	if ((status[16] & 0xF) != card->sd_bus_speed){
+	if ((status[16] & 0xF) != card->sd_bus_speed)
 		pr_warning("%s: Problem setting bus speed mode!\n",
 			mmc_hostname(card->host));
-		if(retry--)
-			goto reswitch;
-		}
-		
 	else {
 		mmc_set_timing(card->host, timing);
 		mmc_set_clock(card->host, card->sw_caps.uhs_max_dtr);
@@ -933,7 +926,7 @@ static int mmc_sd_init_card(struct mmc_host *host, u32 ocr,
 	struct mmc_card *oldcard)
 {
 	struct mmc_card *card;
-	int err, i;
+	int err;
 	u32 cid[4];
 	u32 rocr = 0;
 
@@ -945,13 +938,7 @@ static int mmc_sd_init_card(struct mmc_host *host, u32 ocr,
 
 	err = mmc_sd_get_cid(host, ocr, cid, &rocr);
 	if (err)
-	{
-		printk(KERN_ERR "%s: mmc_sd_get_cid (%d)\n",
-		       __func__, err);
 		return err;
-	}
-	for (i=0; i<4; i++)
-		g_u32_cid[i] = cid[i];
 
 	if (oldcard) {
 		if (memcmp(cid, oldcard->raw_cid, sizeof(cid)) != 0)
@@ -975,13 +962,8 @@ static int mmc_sd_init_card(struct mmc_host *host, u32 ocr,
 	 */
 	if (!mmc_host_is_spi(host)) {
 		err = mmc_send_relative_addr(host, &card->rca);
-		
 		if (err)
-		{
-			printk(KERN_ERR "%s: mmc_send_relative_addr (%d)\n",
-		       __func__, err);
 			return err;
-		}
 	}
 
 	if (!oldcard) {
@@ -1003,20 +985,13 @@ static int mmc_sd_init_card(struct mmc_host *host, u32 ocr,
 
 	err = mmc_sd_setup_card(host, card, oldcard != NULL);
 	if (err)
-	{
-		printk(KERN_ERR "%s: mmc_sd_setup_card (%d)\n",
-		       __func__, err);
 		goto free_card;
-	}
+
 	/* Initialization sequence for UHS-I cards */
 	if (rocr & SD_ROCR_S18A) {
 		err = mmc_sd_init_uhs_card(card);
 		if (err)
-		{
-			printk(KERN_ERR "%s: mmc_sd_init_uhs_card (%d)\n",
-		       __func__, err);
 			goto free_card;
-		}
 
 		/* Card is an ultra-high-speed card */
 		mmc_card_set_uhs(card);
@@ -1052,12 +1027,7 @@ static int mmc_sd_init_card(struct mmc_host *host, u32 ocr,
 			(card->scr.bus_widths & SD_SCR_BUS_WIDTH_4)) {
 			err = mmc_app_set_bus_width(card, MMC_BUS_WIDTH_4);
 			if (err)
-			{
-				printk(KERN_ERR "%s: mmc_app_set_bus_width (%d)\n",
-		       __func__, err);
 				goto free_card;
-				
-			}
 
 			mmc_set_bus_width(host, MMC_BUS_WIDTH_4);
 		}
@@ -1069,11 +1039,6 @@ static int mmc_sd_init_card(struct mmc_host *host, u32 ocr,
 free_card:
 	if (!oldcard)
 		mmc_remove_card(card);
-	if(err)
-	{
-		printk(KERN_ERR "%s: Err return (%d)\n",
-		       __func__, err);
-	}
 
 	return err;
 }
@@ -1200,10 +1165,7 @@ static int mmc_sd_resume(struct mmc_host *host)
 
 	return err;
 }
-int mmc_sd_power_cycle(struct mmc_host *host,u32 ocr,struct mmc_card *card)
-{
-	return mmc_sd_init_card(host,ocr,card);
-}
+
 static int mmc_sd_power_restore(struct mmc_host *host)
 {
 	int ret;
