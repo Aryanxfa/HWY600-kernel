@@ -8,7 +8,7 @@
 # Using GCC
 ###################################################################
 
-CROSS_COMPILE	?= $(CONFIG_CROSS_COMPILE:"%"=%)
+CROSS_COMPILE = arm-linux-androideabi-
 
 AS	= $(CROSS_COMPILE)as
 LD	= $(CROSS_COMPILE)ld
