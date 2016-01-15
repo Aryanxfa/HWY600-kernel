@@ -164,7 +164,7 @@ DEPS := $(ALLOBJS:%o=%d)
 
 # default to no ccache
 CCACHE ?= 
-CC ?= $(CONFIG_CROSS_COMPILE:"%"=%)-gcc
+CC := arm-eabi-gcc
 #LD := $(TOOLCHAIN_PREFIX)ld
 LD := $(TOOLCHAIN_PREFIX)ld.bfd
 OBJDUMP := $(TOOLCHAIN_PREFIX)objdump
