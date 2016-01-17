@@ -230,6 +230,39 @@ int IMM_GetOneChannelValue(int dwChannel, int data[4], int* rawdata)
    
 }
 
+int IMM_GetOneChannelValueEX(int dwChannel, int deCount)
+{
+  int count=0;
+  int d1=0;
+  int d0=0;
+  int t=0;
+  int v8;
+  int ret;
+  int tmp=0;
+  int data[4] = {0, 0, 0, 0};
+
+  printf("[adc_driver]: dwChannel=%d\n", dwChannel);
+  while ( 1 )
+  {
+    ++count;
+    if ( IMM_GetOneChannelValue(dwChannel, data, &tmp) < 0 )
+      break;
+    t += tmp;
+    d0 += data[0];
+    d1 += data[1];
+    udelay(100000);
+    if ( count >= deCount ){
+      v8 = d0 / deCount;
+      printf("[adc_driver]:data0 is %d,data1 is %d\n", v8, d1 / deCount);
+      ret = 10 * (d1 / deCount) + 1000 * v8;
+      printf("[adc_driver]: channel[%d]raw =%d\n", dwChannel, t / deCount);
+      printf("[adc_driver]: channel[%d]=%d\n", dwChannel, ret);
+      return ret;
+    }
+  }
+  printf("[adc_driver]: get data error\n");
+}
+
 // 1v == 1000000 uv
 // this function voltage Unit is uv
 int IMM_GetOneChannelValue_Cali(int Channel, int*voltage)
