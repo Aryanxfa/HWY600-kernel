@@ -275,7 +275,7 @@ static void lcm_suspend(void){
 	push_table(lcm_deep_sleep_mode_in_setting, sizeof(lcm_deep_sleep_mode_in_setting) / sizeof(struct LCM_setting_table), 1);
 }
 
-#if defined(BUILD_UBOOT) || defined(BUILD_LK)
+/*#if defined(BUILD_UBOOT) || defined(BUILD_LK)
 #include "cust_adc.h"
 #define LCM_MAX_VOLTAGE 600 
 #define LCM_MIN_VOLTAGE  300 
@@ -302,13 +302,18 @@ static unsigned int lcm_adc_read_chip_id()
 	}
 	return 0;
 }
+#endif */
+
+#if defined(BUILD_UBOOT) || defined(BUILD_LK)
+extern int IMM_GetOneChannelValueEX(int dwChannel, int deCount);
 #endif
+
 static unsigned int lcm_compare_id(void){
 	int id=0;
 	char buffer[5];
 	int array[4];
-	unsigned int result;
-	unsigned int v;
+	int result;
+	int ret;
 	SET_RESET_PIN(1);
 	MDELAY(10);
 	SET_RESET_PIN(0);
@@ -325,15 +330,15 @@ static unsigned int lcm_compare_id(void){
 	LCM_PRINT("[darren] OTM8018B kernel %s \n", __func__);
 	LCM_PRINT("[darren] %s id = 0x%08x \n", __func__, id);
 	#if defined(BUILD_UBOOT) || defined(BUILD_LK)
-//	v = IMM_GetOneChannelValueEX(1, 1);
-	v=lcm_adc_read_chip_id();
+	ret = IMM_GetOneChannelValueEX(1, 1);
+//	ret=lcm_adc_read_chip_id();
 	#endif
 	if ( id == 0x8009 )
-//		#if defined(BUILD_UBOOT) || defined(BUILD_LK)
-//    		result = v-401 <= 598;
-//    	#else
+		#if defined(BUILD_UBOOT) || defined(BUILD_LK)
+    		result = ret-1101 <= 598;
+    	#else
     		result = 1;
-//    	#endif
+    	#endif
   	else
     	result = 0;
 	return result;
